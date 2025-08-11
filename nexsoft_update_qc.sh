@@ -244,6 +244,13 @@ if [[ "$NO_UPDATE" -eq 0 ]]; then
   fi
   if unzip -q "$ZIP_PATH" -d "$EXTRACT_DIR"; then
     mark_ok "Décompressé vers $EXTRACT_DIR"
+    # Nettoyage des artefacts MacOS et sélection du répertoire /update
+    rm -rf "$EXTRACT_DIR/__MACOSX" 2>/dev/null || true
+    UPDATE_ROOT="$EXTRACT_DIR/update"
+    if [[ ! -d "$UPDATE_ROOT" ]]; then
+      mark_ko "Dossier 'update' manquant dans l'archive (attendu: update/opt, update/usr, ...)"; exit 1
+    fi
+    mark_ok "Dossier racine d'update détecté: $UPDATE_ROOT"
   else
     mark_ko "Échec décompression"; exit 1
   fi
@@ -279,6 +286,8 @@ if [[ "$NO_UPDATE" -eq 0 ]]; then
   # 5.0 Sécurité: refuser chemins absolus et '..' dans l'archive
   BAD=0
   while IFS= read -r p; do
+    # Ignorer les artefacts MacOS
+    [[ "$p" == __MACOSX/* ]] && continue
     case "$p" in
       /*|*..*) BAD=1; echo "   ❌ Chemin suspect dans l'archive: $p" ;;
     esac
@@ -290,7 +299,7 @@ if [[ "$NO_UPDATE" -eq 0 ]]; then
   mark_ok "Validation chemins: OK"
 
   # 5.1 Racines détectées (ex: opt, usr, etc) → copie vers /<racine>
-  mapfile -t ROOTS < <(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%P\n' | sort)
+  mapfile -t ROOTS < <(find "$UPDATE_ROOT" -mindepth 1 -maxdepth 1 -type d ! -name "__MACOSX" -printf '%P\n' | sort)
   if (( ${#ROOTS[@]} == 0 )); then
     mark_warn "Aucune racine détectée dans l'archive"
   fi
@@ -307,20 +316,20 @@ if [[ "$NO_UPDATE" -eq 0 ]]; then
   }
 
   for r in "${ROOTS[@]}"; do
-    copy_merge_dir "$EXTRACT_DIR/$r" "/$r"
+    copy_merge_dir "$UPDATE_ROOT/$r" "/$r"
   done
 
   # 5.2 Rendre exécutables les scripts *.sh livrés (usr/local/bin, opt/scripts, etc.)
   while IFS= read -r -d '' f; do
-    target="/${f#"$EXTRACT_DIR/"}"
+    target="/${f#"$UPDATE_ROOT/"}"
     if [[ -f "$target" ]]; then
       chmod 755 "$target" || true
       echo "   ✅ Exécutable → $target"
     fi
-  done < <(find "$EXTRACT_DIR" -type f -name "*.sh" -print0)
+  done < <(find "$UPDATE_ROOT" -type f -name "*.sh" -print0)
 
   # 5.3 Hooks systemd si des unités sont livrées
-  SYSTEMD_DIR="$EXTRACT_DIR/etc/systemd/system"
+  SYSTEMD_DIR="$UPDATE_ROOT/etc/systemd/system"
   if [[ -d "$SYSTEMD_DIR" ]]; then
     systemctl daemon-reload || true
     shopt -s nullglob
@@ -520,7 +529,7 @@ fi
 #######################################
 # 11) Webmin
 #######################################
-step "Vérification Webmin"
+step "Vérification Webmin (test explicite HTTPS)"
 # Méthodes de détection: systemd, script init, process miniserv, test HTTP
 WEBMIN_DETECTED=0
 WEBMIN_ACTIVE=0
@@ -549,7 +558,7 @@ if command -v curl >/dev/null 2>&1; then
   code=$(curl -k -m "$WEBMIN_HTTP_TIMEOUT" -o /dev/null -s -w "%{http_code}" https://127.0.0.1:10000/ || echo "000")
   case "$code" in
     200|301|302|401|403)
-      mark_ok "Webmin répond (HTTP $code)";
+      mark_ok "Webmin HTTPS répond (HTTP $code)";
       WEBMIN_ACTIVE=1; WEBMIN_DETECTED=1 ;;
     000)
       mark_warn "Webmin HTTP injoignable (port 10000 fermé?)" ;;
