@@ -7,6 +7,9 @@ set -euo pipefail
 # CONFIG
 #######################################
 DOWNLOAD_URL="${DOWNLOAD_URL:-https://dl-s3cy4u5n.swisstransfer.com/api/download/9b8b27ec-00cb-4990-8ba9-8bde8d24d250/8d49e288-bb4f-44ef-9174-d2e5dc1dc2fe}"   # <- à adapter
+# HTTP download tuning (UA/Referer). Set DOWNLOAD_REFERER for hosts like SwissTransfer
+DOWNLOAD_UA="${DOWNLOAD_UA:-Mozilla/5.0}"
+DOWNLOAD_REFERER="${DOWNLOAD_REFERER:-}"
 SERVICE_NAME="${SERVICE_NAME:-nexSoft}"
 TARGET_DIR="${TARGET_DIR:-/opt/nexSoft}"
 TIMESHIFT_SCRIPT="${TIMESHIFT_SCRIPT:-/opt/scripts/TimeShift_FactorySettings.sh}"
@@ -63,7 +66,7 @@ Options:
   -h, --help                    Afficher cette aide
 
 Variables d'environnement utiles :
-  DOWNLOAD_URL, SERVICE_NAME, TARGET_DIR, TIMESHIFT_SCRIPT
+  DOWNLOAD_URL, DOWNLOAD_UA, DOWNLOAD_REFERER, SERVICE_NAME, TARGET_DIR, TIMESHIFT_SCRIPT
   SERIAL_DEV, SERIAL_BAUD, ENABLE_RS232_TEST
   SERIAL_NUMBER, OVERWRITE_IDS, NO_UPDATE, NO_TIMESHIFT
 
@@ -201,17 +204,32 @@ if [[ "$NO_UPDATE" -eq 0 ]]; then
   # 1) Download ZIP
   #######################################
   step "Téléchargement du paquet"
+  # Auto-derive referer for SwissTransfer direct links if not provided
+  if [[ -z "$DOWNLOAD_REFERER" && "$DOWNLOAD_URL" =~ swisstransfer\.com/.*/download/([^/]+)/ ]]; then
+    SWX_ID="${BASH_REMATCH[1]}"
+    DOWNLOAD_REFERER="https://www.swisstransfer.com/d/${SWX_ID}"
+    dbg "Referer dérivé pour SwissTransfer: $DOWNLOAD_REFERER"
+  fi
   if command -v curl >/dev/null 2>&1; then
-    if curl -fsSL "$DOWNLOAD_URL" -o "$ZIP_PATH"; then
+    if curl -fL --retry 3 \
+         -A "$DOWNLOAD_UA" \
+         ${DOWNLOAD_REFERER:+-e "$DOWNLOAD_REFERER"} \
+         -o "$ZIP_PATH" \
+         "$DOWNLOAD_URL"; then
       mark_ok "Téléchargé depuis $DOWNLOAD_URL"
     else
-      mark_ko "Échec téléchargement"; exit 1
+      mark_ko "Échec téléchargement (curl)"; exit 1
     fi
   else
-    if wget -q "$DOWNLOAD_URL" -O "$ZIP_PATH"; then
+    # wget fallback with UA and referer
+    if wget -q --tries=3 --retry-connrefused \
+            --user-agent="$DOWNLOAD_UA" \
+            ${DOWNLOAD_REFERER:+--referer="$DOWNLOAD_REFERER"} \
+            -O "$ZIP_PATH" \
+            "$DOWNLOAD_URL"; then
       mark_ok "Téléchargé depuis $DOWNLOAD_URL"
     else
-      mark_ko "Échec téléchargement"; exit 1
+      mark_ko "Échec téléchargement (wget)"; exit 1
     fi
   fi
 
