@@ -6,7 +6,7 @@ set -euo pipefail
 #######################################
 # CONFIG
 #######################################
-DOWNLOAD_URL="${DOWNLOAD_URL:-https://dl-s3cy4u5n.swisstransfer.com/api/download/884d8cd5-a51b-42c6-8017-b98fabdccdac/e1a3d220-245d-416e-aad5-1c0e2c82c4f6}"   # <- à adapter
+DOWNLOAD_URL="${DOWNLOAD_URL:-https://dl-s3cy4u5n.swisstransfer.com/api/download/9b8b27ec-00cb-4990-8ba9-8bde8d24d250/8d49e288-bb4f-44ef-9174-d2e5dc1dc2fe}"   # <- à adapter
 # HTTP download tuning (UA/Referer). Set DOWNLOAD_REFERER for hosts like SwissTransfer
 DOWNLOAD_UA="${DOWNLOAD_UA:-Mozilla/5.0}"
 DOWNLOAD_REFERER="${DOWNLOAD_REFERER:-}"
@@ -839,6 +839,16 @@ else
   else
     mark_warn "Script Timeshift introuvable/non exécutable: $TIMESHIFT_SCRIPT"
   fi
+fi
+
+#######################################
+# 16) Normalisation des propriétaires /opt/nexSoft
+#######################################
+step "Normalisation des propriétaires sur $TARGET_DIR (nexroot:nexroot)"
+if chown -R nexroot:nexroot "$TARGET_DIR" 2>/dev/null; then
+  mark_ok "Propriétaire et groupe appliqués récursivement sur $TARGET_DIR"
+else
+  mark_warn "Échec du chown récursif sur $TARGET_DIR (vérifier droits/disponibilité)"
 fi
 
 #######################################
