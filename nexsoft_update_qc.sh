@@ -6,7 +6,7 @@ set -euo pipefail
 #######################################
 # CONFIG
 #######################################
-DOWNLOAD_URL="${DOWNLOAD_URL:-https://dl-x8tbdpiz.swisstransfer.com/api/download/bd516678-d0a4-4d07-80a4-0aef22f77e3a/609ab9ef-0847-4ca2-b8e7-7bad8f3d94b4}"   # <- à adapter
+DOWNLOAD_URL="${DOWNLOAD_URL:-https://dl-s3cy4u5n.swisstransfer.com/api/download/9b8b27ec-00cb-4990-8ba9-8bde8d24d250/8d49e288-bb4f-44ef-9174-d2e5dc1dc2fe}"   # <- à adapter
 # HTTP download tuning (UA/Referer). Set DOWNLOAD_REFERER for hosts like SwissTransfer
 DOWNLOAD_UA="${DOWNLOAD_UA:-Mozilla/5.0}"
 DOWNLOAD_REFERER="${DOWNLOAD_REFERER:-}"
@@ -307,11 +307,29 @@ if [[ "$NO_UPDATE" -eq 0 ]]; then
   copy_merge_dir() {
     local src="$1" dst="$2"
     mkdir -p "$dst"
-    # merge non destructif: pas de --delete
-    if rsync -a --info=progress2 "$src"/ "$dst"/; then
-      mark_ok "Copie → $dst (merge, sans suppression)"
+
+    # PASS 1: créer uniquement les NOUVEAUX fichiers/dossiers
+    # - ignore-existing => ne touche pas aux fichiers déjà présents
+    # - chown=nexroot:nexroot => owner/groupe pour les nouveaux
+    # - no-owner/no-group/no-perms => ne pousse pas les méta du ZIP
+    if rsync -rltD --info=progress2 \
+             --ignore-existing \
+             --chown=nexroot:nexroot \
+             --no-owner --no-group --no-perms \
+             "$src"/ "$dst"/; then
+      :
     else
-      mark_ko "Échec copie vers $dst"; exit 1
+      mark_ko "Échec copie (nouveaux) vers $dst"; exit 1
+    fi
+
+    # PASS 2: mettre à jour UNIQUEMENT les fichiers existants (sans changer droits/owner/groupe)
+    if rsync -rltD --info=progress2 \
+             --existing \
+             --no-owner --no-group --no-perms \
+             "$src"/ "$dst"/; then
+      mark_ok "Copie → $dst (merge, sans suppression; droits existants préservés; nouveaux en nexroot:nexroot)"
+    else
+      mark_ko "Échec copie (existants) vers $dst"; exit 1
     fi
   }
 
