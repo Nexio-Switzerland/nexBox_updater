@@ -715,9 +715,9 @@ if [[ -b "$ROOT_DEV" ]]; then
   else
     DISK_SIZE=0
   fi
-  # Seuil dynamique: max(50MiB, 2% de la taille de partition)
+  # Seuil dynamique: max(50MiB, 10% de la taille de partition)
   BASE_MARGIN=$((50*1024*1024))
-  PCT_MARGIN=$(( PART_SIZE / 50 ))  # ~2%
+  PCT_MARGIN=$(( PART_SIZE / 10 ))  # ~10%
   MARGIN=$BASE_MARGIN
   if (( PCT_MARGIN > MARGIN )); then MARGIN=$PCT_MARGIN; fi
   msg="root=$ROOT_DEV part_size=$PART_SIZE fs_size=$FS_SIZE disk=$DISK_DEV disk_size=$DISK_SIZE margin=$MARGIN"
@@ -992,7 +992,12 @@ else
       fi
     fi
   else
-fi
+    mark_ok "Pas d'avertissements ni d'erreurs depuis le démarrage du service"
+    if [[ "$DEBUG" -eq 1 ]]; then
+      echo "     (dbg) Aucune correspondance; échantillon brut (dern. 20 lignes) :"
+      printf "%s\n" "$LOG_RAW" | tail -n 20 | sed 's/^/     /'
+    fi
+  fi
 
 #######################################
 # 15) Timeshift snapshot (final)
