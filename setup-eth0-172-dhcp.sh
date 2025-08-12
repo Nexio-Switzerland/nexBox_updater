@@ -63,13 +63,20 @@ echo "[*] Installation du service ${SVC_TEMPLATE}"
 cat > "${SVC_TEMPLATE}" <<EOF
 [Unit]
 Description=Ajoute IP ${STATIC_CIDR} sur %i
-After=network-pre.target
+# Assure que le périphérique existe
+Requires=sys-subsystem-net-devices-%i.device
+After=sys-subsystem-net-devices-%i.device
+# Démarre tôt, avant le réseau complet
+After=systemd-udevd.service network-pre.target
+Wants=systemd-udevd.service
 DefaultDependencies=no
 
 [Service]
 Type=oneshot
+# 1) Monter l'interface même sans câble
+ExecStart=${IP_BIN} link set dev %i up
+# 2) Poser/remplacer l'IP (idempotent)
 ExecStart=${IP_BIN} addr replace ${STATIC_CIDR} dev %i
-ExecStartPost=${IP_BIN} link set dev %i up
 RemainAfterExit=yes
 
 [Install]
@@ -79,8 +86,11 @@ EOF
 # --- 3) Règle udev pour (re)appliquer l'IP sur évènements ---
 echo "[*] Installation de la règle udev ${UDEV_RULE}"
 cat > "${UDEV_RULE}" <<EOF
-# À chaque ajout/changement de l'interface ${IFACE}, (re)poser l'IP fixe
-ACTION=="add|change", SUBSYSTEM=="net", KERNEL=="${IFACE}", ENV{SYSTEMD_WANTS}="add-static-ip@${IFACE}.service"
+# Pose l'IP quand l'interface est créée
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="${IFACE}", ENV{SYSTEMD_WANTS}="add-static-ip@${IFACE}.service"
+
+# Repose l'IP quand le lien devient porteur (câble branché)
+ACTION=="change", SUBSYSTEM=="net", KERNEL=="${IFACE}", ATTR{carrier}=="1", ENV{SYSTEMD_WANTS}="add-static-ip@${IFACE}.service"
 EOF
 
 # --- 4) Drop-in ifupdown minimal (on laisse systemd gérer IP + DHCP) ---
