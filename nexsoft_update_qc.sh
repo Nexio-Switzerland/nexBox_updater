@@ -23,6 +23,10 @@ WEBMIN_HTTP_TIMEOUT="${WEBMIN_HTTP_TIMEOUT:-5}"
 NEXSOFT_CERT_DIR="${NEXSOFT_CERT_DIR:-/opt/nexSoft/cert}"
 CERT_GROUP="${CERT_GROUP:-nexroot}"
 
+# Logs / Backup toggles
+CLEAR_LOGS="${CLEAR_LOGS:-0}"          # 1 = vider journald juste avant restart service
+NO_NEXSOFT_BKP="${NO_NEXSOFT_BKP:-0}"  # 1 = ne pas faire le backup /opt/nexSoft
+
 # RS232 Loopback test (flags & env)
 SERIAL_DEV="${SERIAL_DEV:-/dev/ttyUSB0}"
 SERIAL_BAUD="${SERIAL_BAUD:-115200}"
@@ -62,13 +66,15 @@ Options:
   --overwrite-ids               Écraser DEVICE_ID / SERIAL_NUMBER existants dans ${PRODUCT_FILE} sans confirmation
   --no-update                   Ne fait PAS le téléchargement/décompression/copie (QC seulement)
   --no-timeshift                Désactive le snapshot Timeshift final
-  --non-interactive            Ne pose aucune question (utilise valeur existante ou SN-UNSET)
+  --clear-logs                  Vide les logs journald avant le redémarrage du service
+  --no-nexSoft-bkp              Ne pas faire le backup de /opt/nexSoft
+  --non-interactive             Ne pose aucune question (utilise valeur existante ou SN-UNSET)
   -h, --help                    Afficher cette aide
 
 Variables d'environnement utiles :
   DOWNLOAD_URL, DOWNLOAD_UA, DOWNLOAD_REFERER, SERVICE_NAME, TARGET_DIR, TIMESHIFT_SCRIPT
   SERIAL_DEV, SERIAL_BAUD, ENABLE_RS232_TEST
-  SERIAL_NUMBER, OVERWRITE_IDS, NO_UPDATE, NO_TIMESHIFT
+  SERIAL_NUMBER, OVERWRITE_IDS, NO_UPDATE, NO_TIMESHIFT, CLEAR_LOGS, NO_NEXSOFT_BKP
 
 EOF
 }
@@ -81,6 +87,8 @@ for arg in "$@"; do
     --serial-dev=*) SERIAL_DEV="${arg#*=}" ;;
     --serial-number=*) SERIAL_NUMBER_ENV="${arg#*=}" ;;
     --sn=*) SERIAL_NUMBER_ENV="${arg#*=}" ;;
+    --clear-logs) CLEAR_LOGS=1 ;;
+    --no-nexSoft-bkp) NO_NEXSOFT_BKP=1 ;;
     --non-interactive) INTERACTIVE_FORCE=0 ;;
     --overwrite-ids) OVERWRITE_IDS=1 ;;
     --no-update) NO_UPDATE=1 ;;
@@ -185,6 +193,59 @@ if [[ "$INTERACTIVE" -eq 0 ]]; then
 fi
 dbg "INTERACTIVE=$INTERACTIVE FORCE=${INTERACTIVE_FORCE:-1} tty0=$([[ -t 0 ]] && echo 1 || echo 0) tty1=$([[ -t 1 ]] && echo 1 || echo 0) /dev/tty=$([[ -r /dev/tty ]] && echo R || echo -)"
 
+#######################################
+# Pré-saisie : SN + info bouchon RS232
+#######################################
+step "Pré-saisie Serial Number & info RS232"
+
+# Calcule et affiche l'ID (depuis MAC) au moment de la demande
+CURRENT_MAC_PRE="$(cat /sys/class/net/eth0/address 2>/dev/null || echo "00:00:00:00:00:00")"
+MAC_DEC_PRE="$(mac_to_serial "$CURRENT_MAC_PRE")"
+DEVICE_ID_FMT_PRE="$(format_blocks_5 "$MAC_DEC_PRE")"
+say "   ID calculé (MAC eth0) : ${DEVICE_ID_FMT_PRE}"
+
+SERIAL_NUMBER_EARLY=""
+if [[ -z "${SERIAL_NUMBER_ENV}" && "$INTERACTIVE" -eq 1 ]]; then
+  EXIST_SN_EARLY="$(grep -E '^SERIAL_NUMBER=' /etc/dietpi/.product_id 2>/dev/null | sed 's/^SERIAL_NUMBER=//')"
+  if [[ -n "$EXIST_SN_EARLY" && "$OVERWRITE_IDS" -eq 0 ]]; then
+    PROMPT_TEXT="   Saisir SERIAL_NUMBER [Entrée = conserver: $EXIST_SN_EARLY] : "
+  else
+    PROMPT_TEXT="   Saisir SERIAL_NUMBER [Entrée = SN-UNSET] : "
+  fi
+  if [[ -r /dev/tty ]]; then
+    printf "%s" "$PROMPT_TEXT" > /dev/tty 2>/dev/null || true
+    if read -t 30 -r SERIAL_NUMBER_EARLY </dev/tty; then :; else SERIAL_NUMBER_EARLY=""; fi
+  fi
+  if [[ -z "$SERIAL_NUMBER_EARLY" ]]; then
+    if [[ -n "$EXIST_SN_EARLY" && "$OVERWRITE_IDS" -eq 0 ]]; then
+      SERIAL_NUMBER_EARLY="$EXIST_SN_EARLY"
+    else
+      SERIAL_NUMBER_EARLY="SN-UNSET"
+    fi
+  fi
+  mark_ok "SN pré-saisi → ${SERIAL_NUMBER_EARLY}"
+  # Injecte pour éviter une seconde invite à l'étape 13
+  SERIAL_NUMBER_ENV="$SERIAL_NUMBER_EARLY"
+else
+  dbg "SN pré-saisie ignorée (non-interactif ou SN fourni via CLI/env)"
+fi
+
+# Question RS232 (informatif uniquement)
+RS232_PLUGGED="unknown"
+if [[ "$INTERACTIVE" -eq 1 ]]; then
+  if [[ -r /dev/tty ]]; then
+    printf "%s" "   Le bouchon RS232 (loopback) est-il branché ? [o/N] : " > /dev/tty 2>/dev/null || true
+    if read -t 15 -r ans </dev/tty; then
+      [[ "$ans" =~ ^[oOyY]$ ]] && RS232_PLUGGED="yes" || RS232_PLUGGED="no"
+    else
+      RS232_PLUGGED="no"
+    fi
+  fi
+  [[ "$RS232_PLUGGED" == "yes" ]] && mark_ok "Bouchon RS232 : présent" || mark_warn "Bouchon RS232 : absent"
+else
+  dbg "Question RS232 non posée (mode non-interactif)"
+fi
+
 WORKDIR="$(mktemp -d /tmp/nexSoft_update.XXXXXX)"
 ZIP_PATH="$WORKDIR/package.zip"
 EXTRACT_DIR="$WORKDIR/extracted"
@@ -259,12 +320,16 @@ if [[ "$NO_UPDATE" -eq 0 ]]; then
   # 3) Backup /opt/nexSoft
   #######################################
   step "Backup de $TARGET_DIR"
-  BKP_ROOT="/opt/backups"; mkdir -p "$BKP_ROOT"
-  BKP_PATH="$BKP_ROOT/nexSoft-$(timestamp).tar.gz"
-  if tar -C / -czf "$BKP_PATH" "${TARGET_DIR#/}" 2>/dev/null; then
-    mark_ok "Backup OK → $BKP_PATH"
+  if [[ "$NO_NEXSOFT_BKP" -eq 1 ]]; then
+    mark_warn "Backup de $TARGET_DIR désactivé (--no-nexSoft-bkp)"
   else
-    mark_ko "Backup échoué"; exit 1
+    BKP_ROOT="/opt/backups"; mkdir -p "$BKP_ROOT"
+    BKP_PATH="$BKP_ROOT/nexSoft-$(timestamp).tar.gz"
+    if tar -C / -czf "$BKP_PATH" "${TARGET_DIR#/}" 2>/dev/null; then
+      mark_ok "Backup OK → $BKP_PATH"
+    else
+      mark_ko "Backup échoué"; exit 1
+    fi
   fi
 
   #######################################
@@ -363,6 +428,16 @@ if [[ "$NO_UPDATE" -eq 0 ]]; then
 else
   step "Mode --no-update : on saute téléchargement / décompression / backup / copie"
   mark_ok "Aucune mise à jour de fichiers effectuée"
+fi
+
+#######################################
+# 5.4 Vérification du hashfile
+#######################################
+step "Vérification du fichier hashfile"
+if [[ -f "$TARGET_DIR/hashfile" ]]; then
+  mark_ok "hashfile présent → $TARGET_DIR/hashfile"
+else
+  mark_warn "hashfile manquant dans $TARGET_DIR (attendu: $TARGET_DIR/hashfile)"
 fi
 
 #######################################
@@ -775,6 +850,15 @@ fi
 # 14bis) Redémarrage du service + health logs (avant Timeshift)
 #######################################
 if [[ "$SERVICE_NEEDS_START" -eq 1 ]]; then
+  if [[ "$CLEAR_LOGS" -eq 1 ]]; then
+    step "Nettoyage des logs (journald) avant redémarrage"
+    journalctl --rotate || true
+    if journalctl --vacuum-time=1s; then
+      mark_ok "journald vidé (rotate + vacuum 1s)"
+    else
+      mark_warn "Échec du vacuum journald (continuer)"
+    fi
+  fi
   step "Démarrage du service ${SERVICE_NAME}"
   if systemctl start "$SERVICE_NAME"; then
     mark_ok "Start demandé"
