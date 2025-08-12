@@ -15,7 +15,13 @@ TARGET_DIR="${TARGET_DIR:-/opt/nexSoft}"
 TIMESHIFT_SCRIPT="${TIMESHIFT_SCRIPT:-/opt/scripts/TimeShift_FactorySettings.sh}"
 STATE_DIR="${STATE_DIR:-/var/lib/nex}"
 MAC_FILE="$STATE_DIR/previous_mac"
+
 SERVICE_START_TIMEOUT="${SERVICE_START_TIMEOUT:-20}"
+
+# Delais d'attente après démarrage du service avant analyse des logs
+SERVICE_POST_START_WAIT="${SERVICE_POST_START_WAIT:-3}"
+# Fenêtre d'analyse par défaut si pas de redémarrage (en secondes)
+SERVICE_LOG_LOOKBACK="${SERVICE_LOG_LOOKBACK:-300}"
 
 WEBMIN_HTTP_TIMEOUT="${WEBMIN_HTTP_TIMEOUT:-5}"
 
@@ -879,12 +885,14 @@ if [[ "$SERVICE_NEEDS_START" -eq 1 ]]; then
     fi
   fi
   step "Démarrage du service ${SERVICE_NAME}"
+  START_EPOCH=$(date +%s)
   if systemctl start "$SERVICE_NAME"; then
     mark_ok "Start demandé"
   else
     mark_ko "Échec démarrage"; exit 1
   fi
 else
+  unset START_EPOCH 2>/dev/null || true
   step "Service ${SERVICE_NAME} : pas de redémarrage nécessaire"
   if systemctl is-active --quiet "$SERVICE_NAME"; then
     mark_ok "Service déjà actif"
@@ -904,12 +912,24 @@ else
   mark_warn "Service non actif après ${SERVICE_START_TIMEOUT}s"
 fi
 
+# Petite attente pour laisser le service écrire ses premiers logs
+sleep "$SERVICE_POST_START_WAIT" 2>/dev/null || true
+
 step "Scan des logs récents (${SERVICE_NAME})"
-if journalctl -u "$SERVICE_NAME" -n 300 --no-pager | grep -Ei "error|exception|traceback|critical|fail" >/dev/null; then
-  mark_warn "Avertissements/erreurs potentiels trouvés (voir ci-dessous)"
-  journalctl -u "$SERVICE_NAME" -n 60 --no-pager | tail -n 60 | sed 's/^/     /'
+JOURNAL_CMD=(journalctl -u "$SERVICE_NAME" --no-pager)
+if [[ -n "${START_EPOCH:-}" ]]; then
+  # Analyser uniquement les logs depuis le redémarrage initié par ce script
+  JOURNAL_CMD+=(--since "@${START_EPOCH}")
 else
-  mark_ok "Pas d'erreurs évidentes dans les 300 dernières lignes"
+  # Pas de redémarrage pendant ce run → prendre une fenêtre récente
+  JOURNAL_CMD+=(--since "-$SERVICE_LOG_LOOKBACK seconds")
+fi
+# Limiter la quantité affichée tout en gardant l'analyse complète
+if "${JOURNAL_CMD[@]}" | grep -Ei "error|exception|traceback|critical|fail" >/dev/null; then
+  mark_warn "Avertissements/erreurs potentiels trouvés (voir ci-dessous)"
+  "${JOURNAL_CMD[@]}" -n 100 | tail -n 100 | sed 's/^/     /'
+else
+  mark_ok "Pas d'erreurs évidentes depuis le démarrage du service"
 fi
 
 #######################################
