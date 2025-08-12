@@ -953,38 +953,45 @@ else
   # Détection 2: priorité journald warning..emerg sur la même fenêtre
   JOURNAL_CMD_PRIO=("${JOURNAL_CMD[@]}" -p warning..emerg)
   dbg "Commande journalctl (priority): ${JOURNAL_CMD_PRIO[*]}"
-  LOG_PRIO_RAW="$("${JOURNAL_CMD_PRIO[@]}" 2>/dev/null || true)"
-  MATCHES_PRIO=$(printf "%s\n" "$LOG_PRIO_RAW" | sed '/^$/d' || true)
+  LOG_PRIO_RAW="$(${JOURNAL_CMD_PRIO[@]} 2>/dev/null || true)"
+  # Nettoyage: retirer les bandeaux/entêtes de journalctl et lignes vides
+  LOG_PRIO_RAW_CLEAN="$(printf "%s\n" "$LOG_PRIO_RAW" | sed -e '/^-- No entries --$/d' -e '/^-- .* --$/d' -e '/^$/d')"
+  MATCHES_PRIO="$LOG_PRIO_RAW_CLEAN"
   PRIO_COUNT=$(printf "%s\n" "$MATCHES_PRIO" | wc -l | tr -d ' ')
 
   if (( KW_COUNT>0 || PRIO_COUNT>0 )); then
-    TOTAL_FOUND=$((KW_COUNT+PRIO_COUNT))
-    mark_warn "Événements WARN/ERROR détectés (lignes analysées: $LINES_TOTAL, trouvées: $TOTAL_FOUND) — détails plus bas et dans le récap."
-    # Construit un extrait combiné (unique) pour affichage immédiat et pour le récap final
-    COMBINED_MATCHES="$(printf "%s\n%s\n" "$MATCHES_PRIO" "$MATCHES_KEYWORD" | sed '/^$/d' | awk '!seen[$0]++')"
-    # Limite l'extrait à 25 lignes max pour éviter de noyer la console
-    LOG_MATCH_SUMMARY="$(printf "%s\n" "$COMBINED_MATCHES" | tail -n 25)"
-    # Affichage détaillé pendant le run
-    if [[ -n "$MATCHES_PRIO" ]]; then
-      echo "     --- Journald priority warning..emerg ---"
-      printf "%s\n" "$MATCHES_PRIO" | tail -n 200 | sed 's/^/     /'
-    fi
-    if [[ -n "$MATCHES_KEYWORD" ]]; then
-      echo "     --- Mots-clés (error|exception|traceback|critical|fail|warn) ---"
-      printf "%s\n" "$MATCHES_KEYWORD" | tail -n 200 | sed 's/^/     /'
-    fi
-    # En mode debug, afficher aussi quelques lignes de contexte brut
-    if [[ "$DEBUG" -eq 1 ]]; then
-      echo "     --- Extrait brut (dern. 40 lignes) ---"
-      printf "%s\n" "$LOG_RAW" | tail -n 40 | sed 's/^/     /'
+    # Construit un ensemble combiné, nettoyé et dédoublonné
+    COMBINED_MATCHES="$(printf "%s\n%s\n" "$MATCHES_PRIO" "$MATCHES_KEYWORD" \
+      | sed -e '/^-- .* --$/d' -e '/^$/d' \
+      | awk '!seen[$0]++')"
+    FOUND_COUNT=$(printf "%s\n" "$COMBINED_MATCHES" | sed '/^$/d' | wc -l | tr -d ' ')
+
+    if (( FOUND_COUNT>0 )); then
+      mark_warn "Événements WARN/ERROR détectés (lignes analysées: $LINES_TOTAL, trouvées: $FOUND_COUNT) — détails plus bas et dans le récap."
+      # Limite l'extrait à 25 lignes max pour éviter de noyer la console
+      LOG_MATCH_SUMMARY="$(printf "%s\n" "$COMBINED_MATCHES" | tail -n 25)"
+      # Affichage détaillé pendant le run
+      if [[ -n "$MATCHES_PRIO" ]]; then
+        echo "     --- Journald priority warning..emerg ---"
+        printf "%s\n" "$MATCHES_PRIO" | tail -n 200 | sed 's/^/     /'
+      fi
+      if [[ -n "$MATCHES_KEYWORD" ]]; then
+        echo "     --- Mots-clés (error|exception|traceback|critical|fail|warn) ---"
+        printf "%s\n" "$MATCHES_KEYWORD" | tail -n 200 | sed 's/^/     /'
+      fi
+      if [[ "$DEBUG" -eq 1 ]]; then
+        echo "     --- Extrait brut (dern. 40 lignes) ---"
+        printf "%s\n" "$LOG_RAW" | tail -n 40 | sed 's/^/     /'
+      fi
+    else
+      # Faux-positif dû aux bandeaux journalctl -> considérer comme aucun résultat
+      mark_ok "Pas d'avertissements ni d'erreurs depuis le démarrage du service"
+      if [[ "$DEBUG" -eq 1 ]]; then
+        echo "     (dbg) Aucune correspondance utile; échantillon brut (dern. 20 lignes) :"
+        printf "%s\n" "$LOG_RAW" | tail -n 20 | sed 's/^/     /'
+      fi
     fi
   else
-    mark_ok "Pas d'avertissements ni d'erreurs depuis le démarrage du service"
-    if [[ "$DEBUG" -eq 1 ]]; then
-      echo "     (dbg) Aucune correspondance trouvée; échantillon brut (dern. 20 lignes) :"
-      printf "%s\n" "$LOG_RAW" | tail -n 20 | sed 's/^/     /'
-    fi
-  fi
 fi
 
 #######################################
@@ -1042,7 +1049,8 @@ done
 # Afficher, si présent, un résumé des lignes de log WARN/ERROR détectées
 if [[ -n "$LOG_MATCH_SUMMARY" ]]; then
   echo -e "${BLU}--- Extrait des lignes WARN/ERROR détectées ---${RST}"
-  printf "%s\n" "$LOG_MATCH_SUMMARY" | sed 's/^/  /'
+  printf "%s\n" "$LOG_MATCH_SUMMARY" \
+    | sed -e '/^-- .* --$/d' -e '/^$/d' -e 's/^/  /'
 fi
 say -e "${BLU}Backup:${RST} ${BKP_PATH:-"(aucun - --no-update)"}"
 if (( FAILS>0 )); then
