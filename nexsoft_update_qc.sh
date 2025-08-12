@@ -198,6 +198,10 @@ dbg "INTERACTIVE=$INTERACTIVE FORCE=${INTERACTIVE_FORCE:-1} tty0=$([[ -t 0 ]] &&
 #######################################
 step "Pré-saisie Serial Number & info RS232"
 
+# Ne pas faire échouer le script en cas de souci d'I/O interactif
+set +e
+
+dbg "ENTRÉE pré-saisie"
 # Calcule et affiche l'ID (depuis MAC) au moment de la demande
 CURRENT_MAC_PRE="$(cat /sys/class/net/eth0/address 2>/dev/null || echo "00:00:00:00:00:00")"
 MAC_DEC_PRE="$(mac_to_serial "$CURRENT_MAC_PRE")"
@@ -213,8 +217,17 @@ if [[ -z "${SERIAL_NUMBER_ENV}" && "$INTERACTIVE" -eq 1 ]]; then
     PROMPT_TEXT="   Saisir SERIAL_NUMBER [Entrée = SN-UNSET] : "
   fi
   if [[ -r /dev/tty ]]; then
-    printf "%s" "$PROMPT_TEXT" > /dev/tty 2>/dev/null || true
-    if read -t 30 -r SERIAL_NUMBER_EARLY </dev/tty; then :; else SERIAL_NUMBER_EARLY=""; fi
+    # Prompt direct via /dev/tty
+    if ! IFS= read -r -p "$PROMPT_TEXT" SERIAL_NUMBER_EARLY </dev/tty; then
+      dbg "read(/dev/tty) a échoué; valeur vide"
+      SERIAL_NUMBER_EARLY=""
+    fi
+  else
+    # Fallback (rare): tenter sur stdin
+    if ! IFS= read -r -p "$PROMPT_TEXT" SERIAL_NUMBER_EARLY; then
+      dbg "read(stdin) a échoué; valeur vide"
+      SERIAL_NUMBER_EARLY=""
+    fi
   fi
   if [[ -z "$SERIAL_NUMBER_EARLY" ]]; then
     if [[ -n "$EXIST_SN_EARLY" && "$OVERWRITE_IDS" -eq 0 ]]; then
@@ -234,17 +247,23 @@ fi
 RS232_PLUGGED="unknown"
 if [[ "$INTERACTIVE" -eq 1 ]]; then
   if [[ -r /dev/tty ]]; then
-    printf "%s" "   Le bouchon RS232 (loopback) est-il branché ? [o/N] : " > /dev/tty 2>/dev/null || true
-    if read -t 15 -r ans </dev/tty; then
-      [[ "$ans" =~ ^[oOyY]$ ]] && RS232_PLUGGED="yes" || RS232_PLUGGED="no"
-    else
-      RS232_PLUGGED="no"
+    if ! IFS= read -r -p "   Le bouchon RS232 (loopback) est-il branché ? [o/N] : " ans </dev/tty; then
+      ans=""
+    fi
+  else
+    if ! IFS= read -r -p "   Le bouchon RS232 (loopback) est-il branché ? [o/N] : " ans; then
+      ans=""
     fi
   fi
+  [[ "$ans" =~ ^[oOyY]$ ]] && RS232_PLUGGED="yes" || RS232_PLUGGED="no"
   [[ "$RS232_PLUGGED" == "yes" ]] && mark_ok "Bouchon RS232 : présent" || mark_warn "Bouchon RS232 : absent"
 else
   dbg "Question RS232 non posée (mode non-interactif)"
 fi
+
+dbg "SORTIE pré-saisie"
+# Réactiver le mode strict
+set -e
 
 WORKDIR="$(mktemp -d /tmp/nexSoft_update.XXXXXX)"
 ZIP_PATH="$WORKDIR/package.zip"
