@@ -883,6 +883,8 @@ if [[ "$SERVICE_NEEDS_START" -eq 1 ]]; then
     else
       mark_warn "Échec du vacuum journald (continuer)"
     fi
+    # Laisse journald finaliser la rotation pour des bornes propres
+    sleep 1
   fi
   step "Démarrage du service ${SERVICE_NAME}"
   START_EPOCH=$(date +%s)
@@ -916,7 +918,7 @@ fi
 sleep "$SERVICE_POST_START_WAIT" 2>/dev/null || true
 
 step "Scan des logs récents (${SERVICE_NAME})"
-JOURNAL_CMD=(journalctl -u "$SERVICE_NAME" --no-pager)
+JOURNAL_CMD=(journalctl -b -u "$SERVICE_NAME" --no-pager)
 if [[ -n "${START_EPOCH:-}" ]]; then
   # Analyser uniquement les logs depuis le redémarrage initié par ce script
   JOURNAL_CMD+=(--since "@${START_EPOCH}")
@@ -924,12 +926,13 @@ else
   # Pas de redémarrage pendant ce run → prendre une fenêtre récente
   JOURNAL_CMD+=(--since "-$SERVICE_LOG_LOOKBACK seconds")
 fi
-# Limiter la quantité affichée tout en gardant l'analyse complète
-if "${JOURNAL_CMD[@]}" | grep -Ei "error|exception|traceback|critical|fail" >/dev/null; then
-  mark_warn "Avertissements/erreurs potentiels trouvés (voir ci-dessous)"
-  "${JOURNAL_CMD[@]}" -n 100 | tail -n 100 | sed 's/^/     /'
+ERROR_REGEX='error|exception|traceback|critical|fail|warn'
+MATCHES=$("${JOURNAL_CMD[@]}" | grep -Ein "$ERROR_REGEX" || true)
+if [[ -n "$MATCHES" ]]; then
+  mark_warn "Événements WARN/ERROR détectés dans les logs (extraits ci-dessous)"
+  echo "$MATCHES" | tail -n 200 | sed 's/^/     /'
 else
-  mark_ok "Pas d'erreurs évidentes depuis le démarrage du service"
+  mark_ok "Pas d'avertissements ni d'erreurs depuis le démarrage du service"
 fi
 
 #######################################
