@@ -887,14 +887,14 @@ if [[ "$SERVICE_NEEDS_START" -eq 1 ]]; then
     sleep 1
   fi
   step "Démarrage du service ${SERVICE_NAME}"
-  START_EPOCH=$(date +%s)
+  SERVICE_START_EPOCH=$(date +%s)
   if systemctl start "$SERVICE_NAME"; then
     mark_ok "Start demandé"
   else
     mark_ko "Échec démarrage"; exit 1
   fi
 else
-  unset START_EPOCH 2>/dev/null || true
+  unset SERVICE_START_EPOCH 2>/dev/null || true
   step "Service ${SERVICE_NAME} : pas de redémarrage nécessaire"
   if systemctl is-active --quiet "$SERVICE_NAME"; then
     mark_ok "Service déjà actif"
@@ -919,22 +919,39 @@ sleep "$SERVICE_POST_START_WAIT" 2>/dev/null || true
 
 step "Scan des logs récents (${SERVICE_NAME})"
 ERROR_REGEX='error|exception|traceback|critical|fail|warn'
-JOURNAL_CMD=(journalctl -b -u "$SERVICE_NAME" --no-pager --output=short-iso)
-if [[ -n "${START_EPOCH:-}" ]]; then
-  # Analyser uniquement les logs depuis le redémarrage initié par ce script
-  START_EPOCH=$(date +%s)
-  SINCE_EPOCH=$(( START_EPOCH - 2 ))
-  JOURNAL_CMD+=(--since "@${SINCE_EPOCH}")
+
+# Préférence: filtrer par l'InvocationID systemd de CE démarrage de service
+INVOCATION_ID="$(systemctl show -p InvocationID --value "$SERVICE_NAME" 2>/dev/null | tr -d '\n')"
+JOURNAL_CMD=(journalctl -u "$SERVICE_NAME" --no-pager --output=short-iso)
+
+if [[ -n "$INVOCATION_ID" && -n "${SERVICE_START_EPOCH:-}" ]]; then
+  JOURNAL_CMD+=( _SYSTEMD_INVOCATION_ID="$INVOCATION_ID" )
+  dbg "Filtrage par InvocationID=$INVOCATION_ID"
+elif [[ -n "${SERVICE_START_EPOCH:-}" ]]; then
+  # Fallback: filtrer par date/heure depuis le (vrai) démarrage, sans le réécrire
+  SINCE_EPOCH=$(( SERVICE_START_EPOCH - 2 ))
+  JOURNAL_CMD+=( --since "@${SINCE_EPOCH}" )
+  dbg "Filtrage par --since @${SINCE_EPOCH} (SERVICE_START_EPOCH=$SERVICE_START_EPOCH)"
 else
-  # Pas de redémarrage pendant ce run → prendre une fenêtre récente
-  JOURNAL_CMD+=(--since "-$SERVICE_LOG_LOOKBACK seconds")
+  # Aucun redémarrage pendant ce run → fenêtre récente
+  JOURNAL_CMD+=( --since "-${SERVICE_LOG_LOOKBACK} seconds" )
+  dbg "Pas de redémarrage: fenêtre lookback ${SERVICE_LOG_LOOKBACK}s"
 fi
-MATCHES=$("${JOURNAL_CMD[@]}" | grep -Ein "$ERROR_REGEX" || true)
-if [[ -n "$MATCHES" ]]; then
-  mark_warn "Événements WARN/ERROR détectés dans les logs (extraits ci-dessous)"
-  echo "$MATCHES" | tail -n 200 | sed 's/^/     /'
+
+dbg "Commande journalctl: ${JOURNAL_CMD[*]}"
+LOG_SNIPPET="$("${JOURNAL_CMD[@]}" 2>/dev/null || true)"
+LINES_TOTAL=$(printf "%s\n" "$LOG_SNIPPET" | wc -l | tr -d ' ')
+
+if [[ "$LINES_TOTAL" -eq 0 ]]; then
+  mark_warn "Aucune ligne de log capturée pour ${SERVICE_NAME} (vérifier permissions journald)"
 else
-  mark_ok "Pas d'avertissements ni d'erreurs depuis le démarrage du service"
+  MATCHES=$(printf "%s\n" "$LOG_SNIPPET" | grep -Ein "$ERROR_REGEX" || true)
+  if [[ -n "$MATCHES" ]]; then
+    mark_warn "Événements WARN/ERROR détectés (total lignes analysées: $LINES_TOTAL, extraits ci-dessous)"
+    printf "%s\n" "$MATCHES" | tail -n 200 | sed 's/^/     /'
+  else
+    mark_ok "Pas d'avertissements ni d'erreurs depuis le démarrage du service"
+  fi
 fi
 
 #######################################
