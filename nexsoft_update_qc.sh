@@ -19,7 +19,7 @@ MAC_FILE="$STATE_DIR/previous_mac"
 SERVICE_START_TIMEOUT="${SERVICE_START_TIMEOUT:-20}"
 
 # Delais d'attente après démarrage du service avant analyse des logs
-SERVICE_POST_START_WAIT="${SERVICE_POST_START_WAIT:-3}"
+SERVICE_POST_START_WAIT="${SERVICE_POST_START_WAIT:-5}"
 # Fenêtre d'analyse par défaut si pas de redémarrage (en secondes)
 SERVICE_LOG_LOOKBACK="${SERVICE_LOG_LOOKBACK:-300}"
 
@@ -918,15 +918,17 @@ fi
 sleep "$SERVICE_POST_START_WAIT" 2>/dev/null || true
 
 step "Scan des logs récents (${SERVICE_NAME})"
-JOURNAL_CMD=(journalctl -b -u "$SERVICE_NAME" --no-pager)
+ERROR_REGEX='error|exception|traceback|critical|fail|warn'
+JOURNAL_CMD=(journalctl -b -u "$SERVICE_NAME" --no-pager --output=short-iso)
 if [[ -n "${START_EPOCH:-}" ]]; then
   # Analyser uniquement les logs depuis le redémarrage initié par ce script
-  JOURNAL_CMD+=(--since "@${START_EPOCH}")
+  START_EPOCH=$(date +%s)
+  SINCE_EPOCH=$(( START_EPOCH - 2 ))
+  JOURNAL_CMD+=(--since "@${SINCE_EPOCH}")
 else
   # Pas de redémarrage pendant ce run → prendre une fenêtre récente
   JOURNAL_CMD+=(--since "-$SERVICE_LOG_LOOKBACK seconds")
 fi
-ERROR_REGEX='error|exception|traceback|critical|fail|warn'
 MATCHES=$("${JOURNAL_CMD[@]}" | grep -Ein "$ERROR_REGEX" || true)
 if [[ -n "$MATCHES" ]]; then
   mark_warn "Événements WARN/ERROR détectés dans les logs (extraits ci-dessous)"
