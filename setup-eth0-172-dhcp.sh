@@ -1,5 +1,14 @@
+
 #!/usr/bin/env bash
 set -euo pipefail
+
+# =============================================
+# DietPi: IP fixe (172.16.42.100/24) + DHCP sur eth0
+# - Pose l'IP fixe via un service systemd (idempotent)
+# - Lance le client DHCP via un service indépendant
+# - Fonctionne au boot avec ou sans câble, et en PC↔PC
+# - Supprime l'ancien service add-static-ip.service s'il existe
+# =============================================
 
 # --- Réglages ---
 IFACE="eth0"
@@ -7,8 +16,10 @@ STATIC_CIDR="172.16.42.100/24"
 UDEV_RULE="/etc/udev/rules.d/99-add-static-ip.rules"
 SVC_TEMPLATE="/etc/systemd/system/add-static-ip@.service"
 OLD_SVC="/etc/systemd/system/add-static-ip.service"
+DHCP_SVC_TEMPLATE="/etc/systemd/system/dhcp-client@.service"
 IFDROPIN_DIR="/etc/network/interfaces.d"
-IFDROPIN_FILE="$IFDROPIN_DIR/eth0.conf"
+IFDROPIN_FILE="${IFDROPIN_DIR}/eth0.conf"
+IF_MAIN="/etc/network/interfaces"
 BACKUP_SUFFIX=".$(date +%F-%H%M%S).bak"
 
 # --- Détection des binaires ---
@@ -20,7 +31,7 @@ if [[ -z "${IP_BIN}" ]]; then
   exit 1
 fi
 if [[ -z "${DHCLIENT_BIN}" ]]; then
-  # fallback Debian courant
+  # Fallback courants
   if [[ -x /usr/sbin/dhclient ]]; then
     DHCLIENT_BIN="/usr/sbin/dhclient"
   elif [[ -x /sbin/dhclient ]]; then
@@ -31,103 +42,121 @@ if [[ -z "${DHCLIENT_BIN}" ]]; then
   fi
 fi
 
-echo "Utilisation de: ip=$IP_BIN ; dhclient=$DHCLIENT_BIN"
+echo "Utilisation de: ip=${IP_BIN} ; dhclient=${DHCLIENT_BIN}"
 echo
+
+# --- 0) Préparation répertoires ---
+mkdir -p "${IFDROPIN_DIR}"
 
 # --- 1) Nettoyage ancien service systemd (s'il existe) ---
 if systemctl list-unit-files | grep -q "^add-static-ip.service"; then
   echo "[*] Désactivation de l'ancien service add-static-ip.service"
   systemctl disable --now add-static-ip.service || true
 fi
-if [[ -f "$OLD_SVC" ]]; then
-  echo "[*] Suppression de $OLD_SVC"
-  rm -f "$OLD_SVC"
+if [[ -f "${OLD_SVC}" ]]; then
+  echo "[*] Suppression de ${OLD_SVC}"
+  rm -f "${OLD_SVC}"
 fi
 
-# --- 2) Service systemd template déclenché par udev ---
-echo "[*] Installation du service $SVC_TEMPLATE"
-cat > "$SVC_TEMPLATE" <<EOF
+# --- 2) Service systemd template pour IP fixe (idempotent) ---
+echo "[*] Installation du service ${SVC_TEMPLATE}"
+cat > "${SVC_TEMPLATE}" <<EOF
 [Unit]
-Description=Ajoute IP $STATIC_CIDR sur %i (déclenché par udev)
+Description=Ajoute IP ${STATIC_CIDR} sur %i
 After=network-pre.target
 DefaultDependencies=no
 
 [Service]
 Type=oneshot
-ExecStart=$IP_BIN addr replace $STATIC_CIDR dev %i
+ExecStart=${IP_BIN} addr replace ${STATIC_CIDR} dev %i
+ExecStartPost=${IP_BIN} link set dev %i up
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
-# --- 3) Règle udev pour réappliquer l'IP sur add/change ---
-echo "[*] Installation de la règle udev $UDEV_RULE"
-cat > "$UDEV_RULE" <<EOF
-# À chaque ajout/changement de l'interface $IFACE, (re)poser l'IP fixe
-ACTION=="add|change", SUBSYSTEM=="net", KERNEL=="$IFACE", ENV{SYSTEMD_WANTS}="add-static-ip@$IFACE.service"
+# --- 3) Règle udev pour (re)appliquer l'IP sur évènements ---
+echo "[*] Installation de la règle udev ${UDEV_RULE}"
+cat > "${UDEV_RULE}" <<EOF
+# À chaque ajout/changement de l'interface ${IFACE}, (re)poser l'IP fixe
+ACTION=="add|change", SUBSYSTEM=="net", KERNEL=="${IFACE}", ENV{SYSTEMD_WANTS}="add-static-ip@${IFACE}.service"
 EOF
 
-# --- 4) Drop-in ifupdown: statique + DHCP en plus ---
-echo "[*] Configuration ifupdown drop-in: $IFDROPIN_FILE"
-mkdir -p "$IFDROPIN_DIR"
-
-if [[ -f "$IFDROPIN_FILE" ]]; then
-  cp -a "$IFDROPIN_FILE" "$IFDROPIN_FILE$BACKUP_SUFFIX"
-  echo "    sauvegarde: $IFDROPIN_FILE$BACKUP_SUFFIX"
+# --- 4) Drop-in ifupdown minimal (on laisse systemd gérer IP + DHCP) ---
+echo "[*] Configuration ifupdown drop-in: ${IFDROPIN_FILE}"
+if [[ -f "${IFDROPIN_FILE}" ]]; then
+  cp -a "${IFDROPIN_FILE}" "${IFDROPIN_FILE}${BACKUP_SUFFIX}"
+  echo "    sauvegarde: ${IFDROPIN_FILE}${BACKUP_SUFFIX}"
 fi
+cat > "${IFDROPIN_FILE}" <<EOF
+# ${IFDROPIN_FILE} - généré par setup-eth0-172-dhcp.sh
+auto ${IFACE}
+allow-hotplug ${IFACE}
 
-cat > "$IFDROPIN_FILE" <<EOF
-# $IFDROPIN_FILE - généré par setup-eth0-172-dhcp.sh
-auto $IFACE
-allow-hotplug $IFACE
-
-iface $IFACE inet static
-    address $STATIC_CIDR
-
-    # Forcer l'interface UP même sans câble
-    pre-up $IP_BIN link set dev $IFACE up
-
-    # Lancer le DHCP en arrière-plan pour ajouter une IP dynamique si dispo
-    post-up $DHCLIENT_BIN -4 -nw -pf /run/dhclient-$IFACE.pid -lf /var/lib/dhcp/dhclient.$IFACE.leases $IFACE || true
-
-    # Au ifdown: libérer/arrêter proprement le client DHCP
-    pre-down $DHCLIENT_BIN -r -pf /run/dhclient-$IFACE.pid $IFACE 2>/dev/null || true
+iface ${IFACE} inet manual
 EOF
 
 # S'assurer que le fichier principal inclut bien les drop-ins
-IF_MAIN="/etc/network/interfaces"
-if ! grep -qE "^\s*source\s+interfaces\.d/\*" "$IF_MAIN"; then
-  echo "[*] Ajout de 'source interfaces.d/*' dans $IF_MAIN"
-  cp -a "$IF_MAIN" "$IF_MAIN$BACKUP_SUFFIX"
+if ! grep -qE "^\s*source\s+interfaces\.d/\*" "${IF_MAIN}"; then
+  echo "[*] Ajout de 'source interfaces.d/*' dans ${IF_MAIN}"
+  cp -a "${IF_MAIN}" "${IF_MAIN}${BACKUP_SUFFIX}"
   {
     echo ""
     echo "# Drop-in configs"
     echo "source interfaces.d/*"
-  } >> "$IF_MAIN"
+  } >> "${IF_MAIN}"
 fi
 
-# --- 5) Reloads & triggers ---
+# --- 5) Service systemd template pour DHCP (indépendant d'ifup) ---
+echo "[*] Installation du service ${DHCP_SVC_TEMPLATE}"
+cat > "${DHCP_SVC_TEMPLATE}" <<EOF
+[Unit]
+Description=DHCP client sur %i
+After=add-static-ip@%i.service
+Wants=add-static-ip@%i.service
+
+[Service]
+ExecStart=${DHCLIENT_BIN} -4 -nw -pf /run/dhclient-%i.pid -lf /var/lib/dhcp/dhclient.%i.leases %i
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# --- 6) Reload & activation ---
 echo "[*] Reload systemd & udev"
 systemctl daemon-reload
 udevadm control --reload
 
-echo "[*] Déclenchement udev (add/change) pour $IFACE"
-udevadm trigger --subsystem-match=net --attr-match=name="$IFACE" || true
+# Activer et démarrer les services (IP fixe puis DHCP)
+echo "[*] Activation des services add-static-ip@${IFACE} et dhcp-client@${IFACE}"
+systemctl enable add-static-ip@"${IFACE}".service
+systemctl enable dhcp-client@"${IFACE}".service
+systemctl restart add-static-ip@"${IFACE}".service || true
+systemctl restart dhcp-client@"${IFACE}".service || true
 
-# --- 6) Restart propre de l'interface ---
-echo "[*] Redémarrage de l'interface $IFACE"
-ifdown "$IFACE" 2>/dev/null || true
-ifup -v "$IFACE"
+# Déclencher udev pour rejouer la pose d'IP si besoin
+echo "[*] Déclenchement udev (add/change) pour ${IFACE}"
+udevadm trigger --subsystem-match=net --attr-match=name="${IFACE}" || true
 
-# --- 7) Affichage de l'état ---
+# --- 7) État & diagnostics ---
 echo
-echo "=== ÉTAT ADRESSAGE IPv4 sur $IFACE ==="
-ip -4 addr show dev "$IFACE" || true
+echo "=== ÉTAT ADRESSAGE IPv4 sur ${IFACE} ==="
+${IP_BIN} -4 addr show dev "${IFACE}" || true
 
 echo
-echo "=== Derniers logs du service add-static-ip@$IFACE ==="
-journalctl -u "add-static-ip@$IFACE.service" -b --no-pager || true
+echo "=== Statuts services ==="
+systemctl --no-pager --full status add-static-ip@"${IFACE}".service || true
+systemctl --no-pager --full status dhcp-client@"${IFACE}".service || true
 
 echo
-echo "=== DHCP (si serveur dispo) ==="
-tail -n 50 /var/log/syslog | grep -E "dhclient|DHCP" || true
+echo "=== Journaux DHCP récents ==="
+if [[ -f /var/log/syslog ]]; then
+  tail -n 100 /var/log/syslog | grep -Ei "dhclient|dhcp" || true
+else
+  journalctl -b | grep -Ei "dhclient|dhcp" || true
+fi
 
 echo
 echo "Terminé ✅"
