@@ -111,6 +111,7 @@ RED="\033[1;31m"; GRN="\033[1;32m"; YLW="\033[1;33m"; BLU="\033[1;34m"; RST="\03
 OK="✅"; KO="❌"; WRN="⚠️"
 STEP=0; FAILS=0
 declare -a RECAP
+LOG_MATCH_SUMMARY=""
 
 banner(){ echo -e "${BLU}=== nexSoft Update & QC ===${RST}"; }
 say(){ echo -e "$*"; }
@@ -958,13 +959,17 @@ else
 
   if (( KW_COUNT>0 || PRIO_COUNT>0 )); then
     TOTAL_FOUND=$((KW_COUNT+PRIO_COUNT))
-    mark_warn "Événements WARN/ERROR détectés (lignes analysées: $LINES_TOTAL, trouvées: $TOTAL_FOUND)"
-    # On affiche d'abord les priorités système (si existantes), puis les mots-clés distincts
-    if (( PRIO_COUNT>0 )); then
+    mark_warn "Événements WARN/ERROR détectés (lignes analysées: $LINES_TOTAL, trouvées: $TOTAL_FOUND) — détails plus bas et dans le récap."
+    # Construit un extrait combiné (unique) pour affichage immédiat et pour le récap final
+    COMBINED_MATCHES="$(printf "%s\n%s\n" "$MATCHES_PRIO" "$MATCHES_KEYWORD" | sed '/^$/d' | awk '!seen[$0]++')"
+    # Limite l'extrait à 25 lignes max pour éviter de noyer la console
+    LOG_MATCH_SUMMARY="$(printf "%s\n" "$COMBINED_MATCHES" | tail -n 25)"
+    # Affichage détaillé pendant le run
+    if [[ -n "$MATCHES_PRIO" ]]; then
       echo "     --- Journald priority warning..emerg ---"
       printf "%s\n" "$MATCHES_PRIO" | tail -n 200 | sed 's/^/     /'
     fi
-    if (( KW_COUNT>0 )); then
+    if [[ -n "$MATCHES_KEYWORD" ]]; then
       echo "     --- Mots-clés (error|exception|traceback|critical|fail|warn) ---"
       printf "%s\n" "$MATCHES_KEYWORD" | tail -n 200 | sed 's/^/     /'
     fi
@@ -1034,6 +1039,11 @@ for line in "${RECAP[@]}"; do
   [[ "$line" == ${KO}* ]]   && echo -e " ${RED}${line}${RST}" && continue
   echo " $line"
 done
+# Afficher, si présent, un résumé des lignes de log WARN/ERROR détectées
+if [[ -n "$LOG_MATCH_SUMMARY" ]]; then
+  echo -e "${BLU}--- Extrait des lignes WARN/ERROR détectées ---${RST}"
+  printf "%s\n" "$LOG_MATCH_SUMMARY" | sed 's/^/  /'
+fi
 say -e "${BLU}Backup:${RST} ${BKP_PATH:-"(aucun - --no-update)"}"
 if (( FAILS>0 )); then
   say -e "${RED}${KO} Terminé avec ${FAILS} échec(s).${RST}"
