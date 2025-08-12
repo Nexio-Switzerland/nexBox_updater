@@ -998,6 +998,7 @@ else
       printf "%s\n" "$LOG_RAW" | tail -n 20 | sed 's/^/     /'
     fi
   fi
+fi
 
 #######################################
 # 15) Timeshift snapshot (final)
