@@ -939,18 +939,46 @@ else
 fi
 
 dbg "Commande journalctl: ${JOURNAL_CMD[*]}"
-LOG_SNIPPET="$("${JOURNAL_CMD[@]}" 2>/dev/null || true)"
-LINES_TOTAL=$(printf "%s\n" "$LOG_SNIPPET" | wc -l | tr -d ' ')
+LOG_RAW="$("${JOURNAL_CMD[@]}" 2>/dev/null || true)"
+LINES_TOTAL=$(printf "%s\n" "$LOG_RAW" | wc -l | tr -d ' ')
 
 if [[ "$LINES_TOTAL" -eq 0 ]]; then
   mark_warn "Aucune ligne de log capturée pour ${SERVICE_NAME} (vérifier permissions journald)"
 else
-  MATCHES=$(printf "%s\n" "$LOG_SNIPPET" | grep -Ein "$ERROR_REGEX" || true)
-  if [[ -n "$MATCHES" ]]; then
-    mark_warn "Événements WARN/ERROR détectés (total lignes analysées: $LINES_TOTAL, extraits ci-dessous)"
-    printf "%s\n" "$MATCHES" | tail -n 200 | sed 's/^/     /'
+  # Détection 1: mots-clés (insensible à la casse)
+  MATCHES_KEYWORD=$(printf "%s\n" "$LOG_RAW" | grep -Eini "$ERROR_REGEX" || true)
+  KW_COUNT=$(printf "%s\n" "$MATCHES_KEYWORD" | sed '/^$/d' | wc -l | tr -d ' ')
+
+  # Détection 2: priorité journald warning..emerg sur la même fenêtre
+  JOURNAL_CMD_PRIO=("${JOURNAL_CMD[@]}" -p warning..emerg)
+  dbg "Commande journalctl (priority): ${JOURNAL_CMD_PRIO[*]}"
+  LOG_PRIO_RAW="$("${JOURNAL_CMD_PRIO[@]}" 2>/dev/null || true)"
+  MATCHES_PRIO=$(printf "%s\n" "$LOG_PRIO_RAW" | sed '/^$/d' || true)
+  PRIO_COUNT=$(printf "%s\n" "$MATCHES_PRIO" | wc -l | tr -d ' ')
+
+  if (( KW_COUNT>0 || PRIO_COUNT>0 )); then
+    TOTAL_FOUND=$((KW_COUNT+PRIO_COUNT))
+    mark_warn "Événements WARN/ERROR détectés (lignes analysées: $LINES_TOTAL, trouvées: $TOTAL_FOUND)"
+    # On affiche d'abord les priorités système (si existantes), puis les mots-clés distincts
+    if (( PRIO_COUNT>0 )); then
+      echo "     --- Journald priority warning..emerg ---"
+      printf "%s\n" "$MATCHES_PRIO" | tail -n 200 | sed 's/^/     /'
+    fi
+    if (( KW_COUNT>0 )); then
+      echo "     --- Mots-clés (error|exception|traceback|critical|fail|warn) ---"
+      printf "%s\n" "$MATCHES_KEYWORD" | tail -n 200 | sed 's/^/     /'
+    fi
+    # En mode debug, afficher aussi quelques lignes de contexte brut
+    if [[ "$DEBUG" -eq 1 ]]; then
+      echo "     --- Extrait brut (dern. 40 lignes) ---"
+      printf "%s\n" "$LOG_RAW" | tail -n 40 | sed 's/^/     /'
+    fi
   else
     mark_ok "Pas d'avertissements ni d'erreurs depuis le démarrage du service"
+    if [[ "$DEBUG" -eq 1 ]]; then
+      echo "     (dbg) Aucune correspondance trouvée; échantillon brut (dern. 20 lignes) :"
+      printf "%s\n" "$LOG_RAW" | tail -n 20 | sed 's/^/     /'
+    fi
   fi
 fi
 
