@@ -629,25 +629,33 @@ fi
 step "Désactivation & suppression du service add-static-ip.service (legacy IP statique)"
 if [[ "$REMOVE_STATIC_IP_SERVICE" -eq 1 ]]; then
   UNIT_NAME="add-static-ip.service"
-  # Détection de l'unité
-  if systemctl list-unit-files --type=service 2>/dev/null | grep -q "^${UNIT_NAME}\$"; then
-    if systemctl stop "$UNIT_NAME" >/dev/null 2>&1; then
-      mark_ok "Service ${UNIT_NAME} arrêté"
-    else
-      mark_warn "Impossible d'arrêter ${UNIT_NAME} (peut-être déjà inactif)"
-    fi
-    if systemctl disable "$UNIT_NAME" >/dev/null 2>&1; then
-      mark_ok "Service ${UNIT_NAME} désactivé"
-    else
-      mark_warn "Impossible de désactiver ${UNIT_NAME} (peut-être déjà désactivé)"
-    fi
-    if systemctl mask "$UNIT_NAME" >/dev/null 2>&1; then
-      mark_ok "Service ${UNIT_NAME} masqué"
-    else
-      mark_warn "Impossible de masquer ${UNIT_NAME} (peut-être déjà masqué)"
-    fi
+  # Détection (colonne 1 du tableau list-unit-files) + présence fichiers d'unité
+  if systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "$UNIT_NAME" \
+     || [[ -f "/etc/systemd/system/${UNIT_NAME}" || -f "/lib/systemd/system/${UNIT_NAME}" || -f "/usr/lib/systemd/system/${UNIT_NAME}" ]]; then
+    UNIT_FOUND=1
   else
-    mark_warn "${UNIT_NAME} non détecté (ok si jamais installé)"
+    UNIT_FOUND=0
+  fi
+  # Toujours tenter de stopper AVANT toute suppression
+  if systemctl stop "$UNIT_NAME" >/dev/null 2>&1; then
+    mark_ok "Service ${UNIT_NAME} arrêté"
+  else
+    if [[ "$UNIT_FOUND" -eq 1 ]]; then
+      mark_warn "Impossible d'arrêter ${UNIT_NAME} (déjà inactif ?)"
+    else
+      mark_warn "${UNIT_NAME} introuvable lors de l'arrêt (ok si jamais installé)"
+    fi
+  fi
+  # Désactivation + masquage si trouvé (mais on tente quand même sans casser le flux)
+  if systemctl disable "$UNIT_NAME" >/dev/null 2>&1; then
+    mark_ok "Service ${UNIT_NAME} désactivé"
+  else
+    [[ "$UNIT_FOUND" -eq 1 ]] && mark_warn "Impossible de désactiver ${UNIT_NAME} (peut-être déjà désactivé)" || mark_warn "${UNIT_NAME} non détecté (skip disable)"
+  fi
+  if systemctl mask "$UNIT_NAME" >/dev/null 2>&1; then
+    mark_ok "Service ${UNIT_NAME} masqué"
+  else
+    [[ "$UNIT_FOUND" -eq 1 ]] && mark_warn "Impossible de masquer ${UNIT_NAME} (peut-être déjà masqué)" || mark_warn "${UNIT_NAME} non détecté (skip mask)"
   fi
 
   # Suppression des fichiers d'unité et liens
