@@ -53,6 +53,10 @@ OVERWRITE_IDS="${OVERWRITE_IDS:-0}"      # 1 pour écraser sans poser de questio
 # Désactiver Timeshift final
 NO_TIMESHIFT="${NO_TIMESHIFT:-0}"   # 1 = ne pas lancer le snapshot Timeshift final
 NO_UPDATE="${NO_UPDATE:-0}"   # 1 = ne pas faire l'étape update
+# Suppression du service legacy add-static-ip.service (1 = supprimer, défaut ; 0 = conserver)
+REMOVE_STATIC_IP_SERVICE="${REMOVE_STATIC_IP_SERVICE:-1}"
+# Création/activation du nouveau service secondary-ip.service (1 = créer/activer ; 0 = ne rien faire)
+ENABLE_SECONDARY_IP_SERVICE="${ENABLE_SECONDARY_IP_SERVICE:-1}"
 
 #######################################
 # CLI FLAGS
@@ -74,13 +78,17 @@ Options:
   --no-timeshift                Désactive le snapshot Timeshift final
   --clear-logs                  Vide les logs journald avant le redémarrage du service
   --no-nexSoft-bkp              Ne pas faire le backup de /opt/nexSoft
+  --remove-static-ip-service    (Défaut) Désactiver & supprimer add-static-ip.service
+  --keep-static-ip-service      Conserver add-static-ip.service (ne pas toucher)
+  --enable-secondary-ip-service   (Défaut) Installer/activer secondary-ip.service
+  --disable-secondary-ip-service  Ne pas installer/activer secondary-ip.service
   --non-interactive             Ne pose aucune question (utilise valeur existante ou SN-UNSET)
   -h, --help                    Afficher cette aide
 
 Variables d'environnement utiles :
   DOWNLOAD_URL, DOWNLOAD_UA, DOWNLOAD_REFERER, SERVICE_NAME, TARGET_DIR, TIMESHIFT_SCRIPT
   SERIAL_DEV, SERIAL_BAUD, ENABLE_RS232_TEST
-  SERIAL_NUMBER, OVERWRITE_IDS, NO_UPDATE, NO_TIMESHIFT, CLEAR_LOGS, NO_NEXSOFT_BKP
+  SERIAL_NUMBER, OVERWRITE_IDS, NO_UPDATE, NO_TIMESHIFT, CLEAR_LOGS, NO_NEXSOFT_BKP, REMOVE_STATIC_IP_SERVICE, ENABLE_SECONDARY_IP_SERVICE
 
 EOF
 }
@@ -95,6 +103,10 @@ for arg in "$@"; do
     --sn=*) SERIAL_NUMBER_ENV="${arg#*=}" ;;
     --clear-logs) CLEAR_LOGS=1 ;;
     --no-nexSoft-bkp) NO_NEXSOFT_BKP=1 ;;
+    --remove-static-ip-service) REMOVE_STATIC_IP_SERVICE=1 ;;
+    --keep-static-ip-service) REMOVE_STATIC_IP_SERVICE=0 ;;
+    --enable-secondary-ip-service) ENABLE_SECONDARY_IP_SERVICE=1 ;;
+    --disable-secondary-ip-service) ENABLE_SECONDARY_IP_SERVICE=0 ;;
     --non-interactive) INTERACTIVE_FORCE=0 ;;
     --overwrite-ids) OVERWRITE_IDS=1 ;;
     --no-update) NO_UPDATE=1 ;;
@@ -599,6 +611,7 @@ fi
 
 
 
+
 #######################################
 # 8) /dev/ttyUSB0 présent
 #######################################
@@ -607,6 +620,161 @@ if [[ -c /dev/ttyUSB0 ]]; then
   mark_ok "/dev/ttyUSB0 présent"
 else
   mark_warn "/dev/ttyUSB0 manquant"
+fi
+
+
+#######################################
+# 8bis) Désactivation & suppression du service add-static-ip.service
+#######################################
+step "Désactivation & suppression du service add-static-ip.service (legacy IP statique)"
+if [[ "$REMOVE_STATIC_IP_SERVICE" -eq 1 ]]; then
+  UNIT_NAME="add-static-ip.service"
+  # Détection de l'unité
+  if systemctl list-unit-files --type=service 2>/dev/null | grep -q "^${UNIT_NAME}\$"; then
+    if systemctl stop "$UNIT_NAME" >/dev/null 2>&1; then
+      mark_ok "Service ${UNIT_NAME} arrêté"
+    else
+      mark_warn "Impossible d'arrêter ${UNIT_NAME} (peut-être déjà inactif)"
+    fi
+    if systemctl disable "$UNIT_NAME" >/dev/null 2>&1; then
+      mark_ok "Service ${UNIT_NAME} désactivé"
+    else
+      mark_warn "Impossible de désactiver ${UNIT_NAME} (peut-être déjà désactivé)"
+    fi
+    if systemctl mask "$UNIT_NAME" >/dev/null 2>&1; then
+      mark_ok "Service ${UNIT_NAME} masqué"
+    else
+      mark_warn "Impossible de masquer ${UNIT_NAME} (peut-être déjà masqué)"
+    fi
+  else
+    mark_warn "${UNIT_NAME} non détecté (ok si jamais installé)"
+  fi
+
+  # Suppression des fichiers d'unité et liens
+  REMOVED_ANY=0
+  for p in \
+    /etc/systemd/system/add-static-ip.service \
+    /lib/systemd/system/add-static-ip.service \
+    /usr/lib/systemd/system/add-static-ip.service \
+    /etc/systemd/system/multi-user.target.wants/add-static-ip.service \
+    /etc/systemd/system/default.target.wants/add-static-ip.service
+  do
+    if [[ -L "$p" || -f "$p" ]]; then
+      rm -f "$p" 2>/dev/null || true
+      echo "   ✅ Supprimé → $p"
+      REMOVED_ANY=1
+    fi
+  done
+
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed "$UNIT_NAME" >/dev/null 2>&1 || true
+  if (( REMOVED_ANY==1 )); then
+    mark_ok "Fichiers d'unité ${UNIT_NAME} nettoyés"
+  else
+    mark_warn "Aucun fichier d'unité ${UNIT_NAME} à supprimer"
+  fi
+else
+  mark_warn "Suppression ${UNIT_NAME:-add-static-ip.service} désactivée (flag --keep-static-ip-service ou REMOVE_STATIC_IP_SERVICE=0)"
+fi
+
+#######################################
+# 8ter) Installation/activation du service secondary-ip.service (IP fixe + DHCP)
+#######################################
+step "Installation/activation du service secondary-ip.service (IP fixe 172.16.42.100 + DHCP)"
+if [[ "$ENABLE_SECONDARY_IP_SERVICE" -eq 1 ]]; then
+  BIN="/usr/local/bin/secondary-ip.sh"
+  UNIT="/etc/systemd/system/secondary-ip.service"
+  IP_CIDR_DEFAULT="172.16.42.100/24"
+  # 1) Script binaire
+  install -d -m 0755 /usr/local/bin
+  cat > "$BIN" <<'SH'
+#!/bin/bash
+set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+IFACE="eth0"
+IP_CIDR="172.16.42.100/24"
+IP_ONLY="${IP_CIDR%/*}"
+CARRIER="/sys/class/net/$IFACE/carrier"
+
+log(){ logger -t secondary-ip "$*"; }
+
+has_link() { [ -f "$CARRIER" ] && [ "$(cat "$CARRIER")" = "1" ]; }
+has_ip()   { ip -4 addr show dev "$IFACE" | grep -qE "inet $IP_ONLY/"; }
+
+cleanup() {
+  if has_ip; then
+    ip addr del "$IP_CIDR" dev "$IFACE" 2>/dev/null || true
+    log "Service stop → IP $IP_CIDR retirée de $IFACE"
+  fi
+}
+trap cleanup INT TERM
+
+prev="unknown"
+while true; do
+  if has_link; then
+    state="up"
+    if ! has_ip; then
+      ip addr add "$IP_CIDR" dev "$IFACE" 2>/dev/null || true
+      log "Lien UP → IP $IP_CIDR ajoutée sur $IFACE"
+    fi
+  else
+    state="down"
+    if has_ip; then
+      ip addr del "$IP_CIDR" dev "$IFACE" 2>/dev/null || true
+      log "Lien DOWN → IP $IP_CIDR retirée de $IFACE"
+    fi
+  fi
+
+  if [ "$state" != "$prev" ]; then
+    echo "$(date '+%F %T') : câble ${state}"
+    prev="$state"
+  fi
+
+  sleep 2
+done
+SH
+  chmod 755 "$BIN" || true
+  mark_ok "Script installé → $BIN"
+
+  # 2) Unité systemd
+  cat > "$UNIT" <<'UNIT'
+[Unit]
+Description=Surveille eth0 et gère l'IP secondaire 172.16.42.100/24
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/secondary-ip.sh
+Restart=always
+RestartSec=2s
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  chmod 644 "$UNIT" || true
+  systemctl daemon-reload || true
+  if systemctl enable --now secondary-ip.service >/dev/null 2>&1; then
+    mark_ok "secondary-ip.service activé et démarré"
+  else
+    mark_warn "Impossible d'activer/démarrer secondary-ip.service (vérifie systemd)"
+  fi
+
+  # 3) Sanity check: journal
+  if command -v journalctl >/dev/null 2>&1; then
+    if journalctl -u secondary-ip.service -n 1 --no-pager >/dev/null 2>&1; then
+      mark_ok "Journal systemd accessible pour secondary-ip.service"
+    else
+      mark_warn "Journal systemd non disponible (permissions?)"
+    fi
+  fi
+else
+  mark_warn "Installation secondary-ip.service désactivée (--disable-secondary-ip-service ou ENABLE_SECONDARY_IP_SERVICE=0)"
 fi
 
 #######################################
