@@ -310,7 +310,7 @@ if [[ "$NO_UPDATE" -eq 0 ]]; then
     dbg "Referer dérivé pour SwissTransfer: $DOWNLOAD_REFERER"
   fi
   if command -v curl >/dev/null 2>&1; then
-    if curl -fL --retry 3 \
+    if curl -fL -k --retry 3 \
          -A "$DOWNLOAD_UA" \
          ${DOWNLOAD_REFERER:+-e "$DOWNLOAD_REFERER"} \
          -o "$ZIP_PATH" \
