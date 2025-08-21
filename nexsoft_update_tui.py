@@ -160,15 +160,26 @@ class TUI:
         self.stdscr = stdscr
         self.state = state
         curses.curs_set(0)
-        curses.start_color(); curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)    # neutral
-        curses.init_pair(2, curses.COLOR_WHITE, curses.COLOR_RED)     # work
-        curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_GREEN)   # ok
-        curses.init_pair(4, curses.COLOR_CYAN, -1)                    # title
-        curses.init_pair(5, curses.COLOR_YELLOW, -1)                  # field value
-        curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_BLACK)   # neutral dark
-        curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_MAGENTA) # work dark
-        curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_CYAN)    # ok dark
+        # Initialize colors robustly (some TERM/ttys don't support default colors)
+        curses.start_color()
+        has_default_bg = False
+        if curses.has_colors():
+            try:
+                curses.use_default_colors()
+                has_default_bg = True
+            except curses.error:
+                has_default_bg = False
+        bg_default = -1 if has_default_bg else curses.COLOR_BLACK
+
+        # Light theme pairs
+        curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)      # neutral
+        curses.init_pair(2, curses.COLOR_WHITE, curses.COLOR_RED)       # work
+        curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_GREEN)     # ok
+        curses.init_pair(4, curses.COLOR_CYAN, bg_default)              # title
+        curses.init_pair(5, curses.COLOR_YELLOW, bg_default)            # field value
+        curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_BLACK)     # neutral dark
+        curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_MAGENTA)   # work dark
+        curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_CYAN)      # ok dark
 
         self.fields_order = [
             ('DOWNLOAD_URL', 'Download URL'),
